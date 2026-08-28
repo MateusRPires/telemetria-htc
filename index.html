@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Monitor de Telemetria HTC</title>
+
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding: 20px;
+            max-width: 500px;
+            margin: auto;
+            background-color: #f4f6f9;
+
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+
+            min-height: 85vh;
+        }
+
+        .card {
+            background: white;
+            padding: 30px;
+            border-radius: 16px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+            text-align: center;
+        }
+
+        h3 {
+            margin-top: 0;
+            color: #2c3e50;
+            font-size: 22px;
+            margin-bottom: 5px;
+        }
+
+        .sub-titulo {
+            color: #7f8c8d;
+            font-size: 14px;
+            margin-bottom: 25px;
+        }
+
+        .resultado {
+            font-size: 64px;
+            font-weight: bold;
+            color: #1e88e5;
+            margin: 25px 0;
+        }
+
+        .unidade {
+            font-size: 28px;
+            font-weight: normal;
+            color: #555;
+        }
+
+        .raw-titulo {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 25px;
+            margin-bottom: 5px;
+            text-align: left;
+            font-weight: 500;
+        }
+
+        .raw-bytes {
+            font-family: monospace;
+            font-size: 15px;
+            color: #34495e;
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            word-break: break-all;
+            border: 1px solid #e2e8f0;
+            min-height: 24px;
+        }
+
+        .status-container {
+            margin-top: 15px;
+            font-size: 12px;
+            color: #95a5a6;
+        }
+
+        .status-ok {
+            color: #27ae60;
+        }
+
+        .status-erro {
+            color: #e53935;
+        }
+
+        .contador {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #95a5a6;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="card">
+
+    <h3>TELEMETRIA HTC</h3>
+
+    <div class="sub-titulo">
+        Monitoramento em Tempo Real
+    </div>
+
+    <div style="
+        font-size:15px;
+        color:#34495e;
+        font-weight:500;
+    ">
+        Temperatura Atual:
+    </div>
+
+    <div class="resultado" id="output">
+        --.-<span class="unidade"> °C</span>
+    </div>
+
+    <div class="raw-titulo">
+        Última Mensagem MQTT em HEX:
+    </div>
+
+    <div class="raw-bytes" id="rawHex">
+        Conectando ao broker MQTT...
+    </div>
+
+    <div class="status-container" id="tempoReal">
+        Inicializando conexão...
+    </div>
+
+    <div class="contador" id="contador">
+        Mensagens recebidas: 0
+    </div>
+
+</div>
+
+
+<!-- MQTT.js -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+
+<script>
+
+/* ============================================================
+   CONFIGURAÇÃO MQTT
+   ============================================================ */
+
+const MQTT_URL =
+    "wss://broker.emqx.io:8084/mqtt";
+
+const MQTT_TOPIC =
+    "ricefer/htc/dr164/temp";
+
+const CLIENT_ID =
+    "web_htc_" +
+    Math.random()
+        .toString(16)
+        .substring(2, 10);
+
+
+/* ============================================================
+   ELEMENTOS
+   ============================================================ */
+
+const output =
+    document.getElementById("output");
+
+const rawHex =
+    document.getElementById("rawHex");
+
+const status =
+    document.getElementById("tempoReal");
+
+const contadorDisplay =
+    document.getElementById("contador");
+
+let numeroMensagens = 0;
+
+
+/* ============================================================
+   CONEXÃO MQTT
+   ============================================================ */
+
+const client = mqtt.connect(
+    MQTT_URL,
+    {
+        clientId: CLIENT_ID,
+        clean: true,
+        connectTimeout: 10000,
+        reconnectPeriod: 3000,
+        keepalive: 60
+    }
+);
+
+
+/* ============================================================
+   MQTT CONECTADO
+   ============================================================ */
+
+client.on("connect", function () {
+
+    console.log("MQTT conectado");
+
+    rawHex.innerText =
+        "Conectado. Aguardando pacote do DR164...";
+
+    status.innerText =
+        "MQTT conectado";
+
+    status.className =
+        "status-container status-ok";
+
+
+    client.subscribe(
+        MQTT_TOPIC,
+        {
+            qos: 0
+        },
+        function(error) {
+
+            if (error) {
+
+                console.error(
+                    "Erro ao assinar tópico:",
+                    error
+                );
+
+                rawHex.innerText =
+                    "Erro ao assinar o tópico MQTT.";
+
+                status.innerText =
+                    "Erro de Subscription";
+
+                status.className =
+                    "status-container status-erro";
+
+                return;
+            }
+
+            console.log(
+                "Inscrito no tópico:",
+                MQTT_TOPIC
+            );
+
+            status.innerText =
+                "MQTT conectado - aguardando DR164";
+
+        }
+    );
+
+});
+
+
+/* ============================================================
+   MENSAGEM MQTT RECEBIDA
+   ============================================================ */
+
+client.on(
+    "message",
+    function(topic, payload) {
+
+        const bytes =
+            Array.from(payload);
+
+
+        /* ====================================================
+           EXIBE FRAME EM HEX
+           ==================================================== */
+
+        const hex =
+            bytes
+                .map(
+                    byte =>
+                        byte
+                            .toString(16)
+                            .padStart(2, "0")
+                            .toUpperCase()
+                )
+                .join(" ");
+
+        rawHex.innerText =
+            hex;
+
+
+        /* ====================================================
+           VALIDAÇÃO MODBUS
+           
+           Resposta esperada:
+           
+           01 03 02 XX XX CRC CRC
+           ==================================================== */
+
+        if (
+            bytes.length >= 7 &&
+            bytes[0] === 0x01 &&
+            bytes[1] === 0x03 &&
+            bytes[2] === 0x02
+        ) {
+
+            /* ================================================
+               EXTRAI PV
+               
+               BYTE 3 = HIGH
+               BYTE 4 = LOW
+               ================================================ */
+
+            let valorRaw =
+                (bytes[3] << 8) |
+                bytes[4];
+
+
+            /* ================================================
+               CONVERSÃO INT16 COM SINAL
+               ================================================ */
+
+            if (valorRaw & 0x8000) {
+
+                valorRaw -=
+                    0x10000;
+
+            }
+
+
+            /* ================================================
+               ESCALA DO N1200
+               
+               Exemplo:
+               
+               0x0454
+               = 1108
+               
+               1108 / 10
+               = 110.8 °C
+               ================================================ */
+
+            const temperatura =
+                valorRaw / 10;
+
+
+            /* ================================================
+               ATUALIZA TEMPERATURA
+               ================================================ */
+
+            output.innerHTML =
+                temperatura.toFixed(1)
+                +
+                '<span class="unidade"> °C</span>';
+
+        }
+
+
+        /* ====================================================
+           CONTADOR
+           ==================================================== */
+
+        numeroMensagens++;
+
+        contadorDisplay.innerText =
+            "Mensagens recebidas: "
+            +
+            numeroMensagens;
+
+
+        /* ====================================================
+           STATUS
+           ==================================================== */
+
+        const agora =
+            new Date();
+
+        status.innerText =
+            "Última mensagem: "
+            +
+            agora.toLocaleTimeString()
+            +
+            " | "
+            +
+            payload.length
+            +
+            " bytes";
+
+        status.className =
+            "status-container status-ok";
+
+    }
+);
+
+
+/* ============================================================
+   RECONEXÃO
+   ============================================================ */
+
+client.on(
+    "reconnect",
+    function() {
+
+        status.innerText =
+            "Reconectando ao broker MQTT...";
+
+        status.className =
+            "status-container";
+
+    }
+);
+
+
+/* ============================================================
+   OFFLINE
+   ============================================================ */
+
+client.on(
+    "offline",
+    function() {
+
+        status.innerText =
+            "Broker MQTT offline";
+
+        status.className =
+            "status-container status-erro";
+
+    }
+);
+
+
+/* ============================================================
+   ERRO MQTT
+   ============================================================ */
+
+client.on(
+    "error",
+    function(error) {
+
+        console.error(
+            "Erro MQTT:",
+            error
+        );
+
+        status.innerText =
+            "Erro na comunicação MQTT";
+
+        status.className =
+            "status-container status-erro";
+
+    }
+);
+
+</script>
+
+</body>
+</html>
