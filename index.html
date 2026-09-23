@@ -2,11 +2,18 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 
     <title>Monitor de Telemetria HTC</title>
 
     <style>
+        :root {
+            --cor-siemens-on: #009999;
+            --cor-off: #95a5a6;
+            padding-top: env(safe-area-inset-top, 0px);
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             padding: 20px;
@@ -95,6 +102,60 @@
             font-size: 11px;
             color: #95a5a6;
         }
+
+        /* ============================================================
+           BOTÃO RUN / STOP — ESTILO IHM
+           ============================================================ */
+
+        .controle-container {
+            margin-top: 30px;
+            padding-top: 25px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .controle-titulo {
+            font-size: 13px;
+            color: #7f8c8d;
+            font-weight: 500;
+            margin-bottom: 14px;
+            text-align: left;
+        }
+
+        .botao-run-stop {
+            width: 100%;
+            border: none;
+            border-radius: 10px;
+            padding: 18px;
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            color: white;
+            background-color: var(--cor-off);
+            cursor: pointer;
+            transition: background-color 0.25s ease, transform 0.1s ease;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+        }
+
+        .botao-run-stop:active {
+            transform: scale(0.98);
+        }
+
+        .botao-run-stop.ligado {
+            background-color: var(--cor-siemens-on);
+            box-shadow: 0 4px 14px rgba(0,153,153,0.4);
+        }
+
+        .botao-run-stop:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .controle-status {
+            margin-top: 10px;
+            font-size: 11px;
+            color: #95a5a6;
+            text-align: left;
+        }
     </style>
 </head>
 
@@ -136,6 +197,26 @@
         Mensagens recebidas: 0
     </div>
 
+    <!-- ============================================================
+         CONTROLE RUN / STOP DO N1200
+         ============================================================ -->
+
+    <div class="controle-container">
+
+        <div class="controle-titulo">
+            Controle do N1200:
+        </div>
+
+        <button class="botao-run-stop" id="botaoControle" onclick="alternarRunStop()">
+            STOP
+        </button>
+
+        <div class="controle-status" id="controleStatus">
+            Aguardando conexão MQTT...
+        </div>
+
+    </div>
+
 </div>
 
 
@@ -155,11 +236,33 @@ const MQTT_URL =
 const MQTT_TOPIC =
     "ricefer/htc/dr164/temp";
 
+/* Tópico de COMANDO (escrita) para o gateway MQTT<->Modbus.
+   ATENÇÃO: este tópico não estava definido no código original —
+   ajuste para o tópico real configurado no seu gateway/broker. */
+const MQTT_TOPIC_CMD =
+    "ricefer/htc/dr164/cmd";
+
 const CLIENT_ID =
     "web_htc_" +
     Math.random()
         .toString(16)
         .substring(2, 10);
+
+
+/* ============================================================
+   CONFIGURAÇÃO MODBUS DO N1200
+   ============================================================
+
+   Registrador 0047 (rvn) = "Habilita Controle"
+   Faixa: 0 -> não (STOP) | 1 -> sim (RUN)
+
+   (fonte: Tabela de Registradores para Comunicação Serial N1200,
+    Novus Automação)
+   ============================================================ */
+
+const MODBUS_SLAVE_ADDR = 0x01;
+const MODBUS_FUNC_WRITE = 0x06;   // Preset Single Register
+const MODBUS_REG_RVN    = 0x002F; // Registrador 47 (rvn - Habilita Controle)
 
 
 /* ============================================================
@@ -178,7 +281,157 @@ const status =
 const contadorDisplay =
     document.getElementById("contador");
 
+const botaoControle =
+    document.getElementById("botaoControle");
+
+const controleStatus =
+    document.getElementById("controleStatus");
+
 let numeroMensagens = 0;
+let controladorLigado = false;
+let aguardandoResposta = false;
+
+
+/* ============================================================
+   CRC16 MODBUS
+   ============================================================ */
+
+function crc16Modbus(bytes) {
+
+    let crc = 0xFFFF;
+
+    for (let pos = 0; pos < bytes.length; pos++) {
+
+        crc ^= bytes[pos];
+
+        for (let i = 0; i < 8; i++) {
+
+            if (crc & 0x0001) {
+                crc >>= 1;
+                crc ^= 0xA001;
+            } else {
+                crc >>= 1;
+            }
+
+        }
+    }
+
+    return crc;
+}
+
+
+/* ============================================================
+   MONTA FRAME MODBUS RTU - PRESET SINGLE REGISTER (06)
+   ============================================================ */
+
+function montarFrameEscrita(registrador, valor) {
+
+    const frame = [
+        MODBUS_SLAVE_ADDR,
+        MODBUS_FUNC_WRITE,
+        (registrador >> 8) & 0xFF,
+        registrador & 0xFF,
+        (valor >> 8) & 0xFF,
+        valor & 0xFF
+    ];
+
+    const crc = crc16Modbus(frame);
+
+    frame.push(crc & 0xFF);
+    frame.push((crc >> 8) & 0xFF);
+
+    return frame;
+}
+
+
+/* ============================================================
+   ENVIA COMANDO RUN / STOP
+   ============================================================ */
+
+function alternarRunStop() {
+
+    if (aguardandoResposta) {
+        return;
+    }
+
+    if (!client.connected) {
+        controleStatus.innerText =
+            "MQTT desconectado — não é possível enviar comando.";
+        return;
+    }
+
+    const novoEstado = !controladorLigado;
+    const valorRvn = novoEstado ? 1 : 0;
+
+    const frame = montarFrameEscrita(MODBUS_REG_RVN, valorRvn);
+
+    let payload;
+
+    if (typeof Buffer !== "undefined") {
+        payload = Buffer.from(frame);
+    } else {
+        payload = new Uint8Array(frame);
+    }
+
+    aguardandoResposta = true;
+    botaoControle.disabled = true;
+
+    client.publish(
+        MQTT_TOPIC_CMD,
+        payload,
+        { qos: 0 },
+        function(error) {
+
+            aguardandoResposta = false;
+            botaoControle.disabled = false;
+
+            if (error) {
+
+                console.error("Erro ao enviar comando:", error);
+
+                controleStatus.innerText =
+                    "Falha ao enviar comando.";
+
+                return;
+            }
+
+            controladorLigado = novoEstado;
+
+            atualizarBotaoControle();
+
+            const frameHex =
+                frame
+                    .map(b => b.toString(16).padStart(2, "0").toUpperCase())
+                    .join(" ");
+
+            controleStatus.innerText =
+                "Comando enviado: " + frameHex;
+
+        }
+    );
+
+}
+
+
+/* ============================================================
+   ATUALIZA VISUAL DO BOTÃO
+   ============================================================ */
+
+function atualizarBotaoControle() {
+
+    if (controladorLigado) {
+
+        botaoControle.innerText = "RUN";
+        botaoControle.classList.add("ligado");
+
+    } else {
+
+        botaoControle.innerText = "STOP";
+        botaoControle.classList.remove("ligado");
+
+    }
+
+}
 
 
 /* ============================================================
@@ -213,6 +466,9 @@ client.on("connect", function () {
 
     status.className =
         "status-container status-ok";
+
+    controleStatus.innerText =
+        "MQTT conectado. Pronto para enviar comandos.";
 
 
     client.subscribe(
@@ -421,6 +677,9 @@ client.on(
 
         status.className =
             "status-container status-erro";
+
+        controleStatus.innerText =
+            "MQTT offline — comandos indisponíveis.";
 
     }
 );
